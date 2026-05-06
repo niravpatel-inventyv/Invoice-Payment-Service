@@ -1,0 +1,75 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: invoice-postgres
+    environment:
+      POSTGRES_DB: invoice_db
+      POSTGRES_USER: invoice_user
+      POSTGRES_PASSWORD: invoice_pass
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U invoice_user -d invoice_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+  migrate:
+    image: postgres:16-alpine
+    container_name: invoice-migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: invoice_pass
+    volumes:
+      - ./migrations:/migrations:ro
+    command:
+      - sh
+      - -lc
+      - |
+        set -e
+        echo "waiting for postgres..."
+        until pg_isready -h postgres -U invoice_user -d invoice_db; do sleep 1; done
+        echo "applying migrations..."
+        for file in /migrations/*.up.sql; do
+          echo "running $${file}"
+          psql -h postgres -U invoice_user -d invoice_db -f "$${file}"
+        done
+        echo "migrations complete"
+
+  mock-psp:
+    build:
+      context: .
+      dockerfile: services/mock-psp/Dockerfile
+    container_name: mock-psp
+    environment:
+      RUST_LOG: info
+      PSP_BIND_ADDR: 0.0.0.0:8081
+    ports:
+      - "8081:8081"
+
+  invoice-api:
+    build:
+      context: .
+      dockerfile: services/invoice-api/Dockerfile
+    container_name: invoice-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      mock-psp:
+        condition: service_started
+    environment:
+      RUST_LOG: info
+      API_BIND_ADDR: 0.0.0.0:8080
+      DATABASE_URL: postgres://invoice_user:invoice_pass@postgres:5432/invoice_db
+      PSP_BASE_URL: http://mock-psp:8081
+    ports:
+      - "8080:8080"
+
+volumes:
+  pg_data:
